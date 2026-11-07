@@ -39,6 +39,12 @@ on:
                 default: false
                 type: boolean
 
+            unsigned_release:
+                description: 'Build a release APK for external signing'
+                required: false
+                default: false
+                type: boolean
+
             tag:
                 description: "tag"
                 required: false
@@ -117,11 +123,11 @@ jobs:
               run: lib/scripts/build.ps1 android
 
             - name: Flutter Build Release Apk
-              if: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+              if: ${{ github.event_name == 'workflow_dispatch' && (inputs.tag != '' || inputs.unsigned_release) }}
               run: flutter build apk --release --target-platform android-arm64 --split-per-abi --dart-define-from-file=pili_release.json --no-pub
 
             - name: Flutter Build Dev Apk
-              if: ${{ github.event_name != 'workflow_dispatch' || inputs.tag == '' }}
+              if: ${{ github.event_name != 'workflow_dispatch' || (inputs.tag == '' && !inputs.unsigned_release) }}
               run: flutter build apk --debug --target-platform android-arm64 --split-per-abi --no-pub
 
             - name: Verify APK native libraries
