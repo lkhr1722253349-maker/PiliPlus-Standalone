@@ -554,10 +554,10 @@ index 3baa676229fa1dc29f77580778c08b2fd9ba024d..d0043aaedd122c145518056ed7480aa7
                              _controller.speed = value.toPrecision(1);
 diff --git a/lib/pages/listening/audio_proxy.dart b/lib/pages/listening/audio_proxy.dart
 new file mode 100644
-index 0000000000000000000000000000000000000000..15134a5ea5afeed896908e858ed8c46b4f95d5c5
+index 0000000000000000000000000000000000000000..13b6b252425f47ff2b40f5edf1096707e831e44d
 --- /dev/null
 +++ b/lib/pages/listening/audio_proxy.dart
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,235 @@
 +import 'dart:async';
 +import 'dart:convert';
 +import 'dart:io';
@@ -741,8 +741,13 @@ index 0000000000000000000000000000000000000000..15134a5ea5afeed896908e858ed8c46b
 +
 +    File? partialFile;
 +    IOSink? cacheSink;
-+    if (remote.statusCode == HttpStatus.ok &&
-+        remote.headers.value(HttpHeaders.contentRangeHeader) == null) {
++    final contentRange = remote.headers.value(HttpHeaders.contentRangeHeader);
++    final fullRange = RegExp(r'^bytes 0-(\d+)/(\d+)$').firstMatch(contentRange ?? '');
++    final completeRange = fullRange != null &&
++        int.parse(fullRange[1]!) + 1 == int.parse(fullRange[2]!) &&
++        int.parse(fullRange[2]!) == remote.contentLength;
++    if ((remote.statusCode == HttpStatus.ok && contentRange == null) ||
++        (remote.statusCode == HttpStatus.partialContent && completeRange)) {
 +      partialFile = File('${_cacheFile.path}.part');
 +      try {
 +        cacheSink = partialFile.openWrite();
@@ -5880,10 +5885,10 @@ index bca7a29c548a76fd7bce0e3c6ed2321fa05b50a2..34d50c78151d539e607d4bad16970a9a
    flutter_inappwebview_android:
 diff --git a/test/pages/listening/audio_proxy_test.dart b/test/pages/listening/audio_proxy_test.dart
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d9f4566f7b548487cb630490e24121a1a9a4193
+index 0000000000000000000000000000000000000000..09082603fe468e745a15afc94a849cbb12db8f3b
 --- /dev/null
 +++ b/test/pages/listening/audio_proxy_test.dart
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,111 @@
 +import 'dart:io';
 +
 +import 'package:PiliPlus/pages/listening/audio_proxy.dart';
@@ -5924,6 +5929,10 @@ index 0000000000000000000000000000000000000000..7d9f4566f7b548487cb630490e24121a
 +        await response.close();
 +        return;
 +      }
++      if (request.headers.value('range') == 'bytes=0-') {
++        response.statusCode = HttpStatus.partialContent;
++        response.headers.set('content-range', 'bytes 0-8191/8192');
++      }
 +      response.contentLength = payload.length;
 +      if (request.method != 'HEAD') response.add(payload);
 +      await response.close();
@@ -5946,7 +5955,10 @@ index 0000000000000000000000000000000000000000..7d9f4566f7b548487cb630490e24121a
 +      expect(bytes, 2048);
 +      final cacheDirectory = Directory('${support.path}${Platform.pathSeparator}listening_audio');
 +      expect(cacheDirectory.listSync().where((file) => file.path.endsWith('.audio')), isEmpty);
-+      final first = await (await client.getUrl(Uri.parse(proxy.url))).close();
++      final fullRequest = await client.getUrl(Uri.parse(proxy.url));
++      fullRequest.headers.set('range', 'bytes=0-');
++      final first = await fullRequest.close();
++      expect(first.statusCode, HttpStatus.partialContent);
 +      expect((await first.expand((e) => e).toList()), payload);
 +      expect(bytes, 10240);
 +      final cache = Directory('${support.path}${Platform.pathSeparator}listening_audio');
@@ -5968,7 +5980,7 @@ index 0000000000000000000000000000000000000000..7d9f4566f7b548487cb630490e24121a
 +      final head = await (await client.headUrl(Uri.parse(proxy.url))).close();
 +      await head.drain<void>();
 +      expect(bytes, 10240);
-+      expect(ranges, ['bytes=2048-4095', null]);
++      expect(ranges, ['bytes=2048-4095', 'bytes=0-']);
 +      for (final range in ['bytes=-', 'bytes=-0']) {
 +        final request = await client.getUrl(Uri.parse(proxy.url));
 +        request.headers.set('range', range);
