@@ -554,10 +554,10 @@ index 3baa676229fa1dc29f77580778c08b2fd9ba024d..d0043aaedd122c145518056ed7480aa7
                              _controller.speed = value.toPrecision(1);
 diff --git a/lib/pages/listening/audio_proxy.dart b/lib/pages/listening/audio_proxy.dart
 new file mode 100644
-index 0000000000000000000000000000000000000000..a831ebee8ce3f2b4da0c213112b9561e84938816
+index 0000000000000000000000000000000000000000..15134a5ea5afeed896908e858ed8c46b4f95d5c5
 --- /dev/null
 +++ b/lib/pages/listening/audio_proxy.dart
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,230 @@
 +import 'dart:async';
 +import 'dart:convert';
 +import 'dart:io';
@@ -617,7 +617,7 @@ index 0000000000000000000000000000000000000000..a831ebee8ce3f2b4da0c213112b9561e
 +      final files = <File>[];
 +      var totalBytes = 0;
 +      await for (final entity in directory.list()) {
-+        if (entity is! File) continue;
++        if (entity is! File || !entity.path.endsWith('.audio')) continue;
 +        final stat = await entity.stat();
 +        totalBytes += stat.size;
 +        files.add(entity);
@@ -671,7 +671,8 @@ index 0000000000000000000000000000000000000000..a831ebee8ce3f2b4da0c213112b9561e
 +    final range = incoming.headers.value(HttpHeaders.rangeHeader);
 +    if (range != null) {
 +      final match = RegExp(r'^bytes=(\d*)-(\d*)$').firstMatch(range);
-+      if (match == null) {
++      if (match == null ||
++          (match[1]!.isEmpty && (int.tryParse(match[2]!) ?? 0) <= 0)) {
 +        response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
 +        response.headers.set(HttpHeaders.contentRangeHeader, 'bytes */$length');
 +        await response.close();
@@ -718,7 +719,8 @@ index 0000000000000000000000000000000000000000..a831ebee8ce3f2b4da0c213112b9561e
 +    request.headers
 +      ..set(HttpHeaders.userAgentHeader, userAgent)
 +      ..set(HttpHeaders.refererHeader, 'https://www.bilibili.com/');
-+    // Fetch one complete representation so later playback and seeks are local.
++    final range = incoming.headers.value(HttpHeaders.rangeHeader);
++    if (range != null) request.headers.set(HttpHeaders.rangeHeader, range);
 +    final remote = await request.close();
 +    response.statusCode = remote.statusCode;
 +    response.bufferOutput = false;
@@ -5878,10 +5880,10 @@ index bca7a29c548a76fd7bce0e3c6ed2321fa05b50a2..34d50c78151d539e607d4bad16970a9a
    flutter_inappwebview_android:
 diff --git a/test/pages/listening/audio_proxy_test.dart b/test/pages/listening/audio_proxy_test.dart
 new file mode 100644
-index 0000000000000000000000000000000000000000..75bb910e10d83f56eea74764016967536b593f46
+index 0000000000000000000000000000000000000000..7d9f4566f7b548487cb630490e24121a1a9a4193
 --- /dev/null
 +++ b/test/pages/listening/audio_proxy_test.dart
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,104 @@
 +import 'dart:io';
 +
 +import 'package:PiliPlus/pages/listening/audio_proxy.dart';
@@ -5914,6 +5916,14 @@ index 0000000000000000000000000000000000000000..75bb910e10d83f56eea7476401696753
 +      ranges.add(request.headers.value('range'));
 +      final response = request.response;
 +      response.headers.contentType = ContentType('audio', 'mp4');
++      if (request.headers.value('range') == 'bytes=2048-4095') {
++        response.statusCode = HttpStatus.partialContent;
++        response.headers.set('content-range', 'bytes 2048-4095/8192');
++        response.contentLength = 2048;
++        response.add(payload.sublist(2048, 4096));
++        await response.close();
++        return;
++      }
 +      response.contentLength = payload.length;
 +      if (request.method != 'HEAD') response.add(payload);
 +      await response.close();
@@ -5927,9 +5937,18 @@ index 0000000000000000000000000000000000000000..75bb910e10d83f56eea7476401696753
 +    );
 +    final client = HttpClient();
 +    try {
++      final uncached = await client.getUrl(Uri.parse(proxy.url));
++      uncached.headers.set('range', 'bytes=2048-4095');
++      final partial = await uncached.close();
++      expect(partial.statusCode, HttpStatus.partialContent);
++      expect(partial.headers.value('content-range'), 'bytes 2048-4095/8192');
++      expect(await partial.expand((chunk) => chunk).toList(), payload.sublist(2048, 4096));
++      expect(bytes, 2048);
++      final cacheDirectory = Directory('${support.path}${Platform.pathSeparator}listening_audio');
++      expect(cacheDirectory.listSync().where((file) => file.path.endsWith('.audio')), isEmpty);
 +      final first = await (await client.getUrl(Uri.parse(proxy.url))).close();
 +      expect((await first.expand((e) => e).toList()), payload);
-+      expect(bytes, 8192);
++      expect(bytes, 10240);
 +      final cache = Directory('${support.path}${Platform.pathSeparator}listening_audio');
 +      final deadline = DateTime.now().add(const Duration(seconds: 5));
 +      while (!cache.listSync().any((entry) => entry.path.endsWith('.audio'))) {
@@ -5945,11 +5964,18 @@ index 0000000000000000000000000000000000000000..75bb910e10d83f56eea7476401696753
 +        await second.expand((e) => e).toList(),
 +        payload.sublist(2048, 4096),
 +      );
-+      expect(bytes, 8192);
++      expect(bytes, 10240);
 +      final head = await (await client.headUrl(Uri.parse(proxy.url))).close();
 +      await head.drain<void>();
-+      expect(bytes, 8192);
-+      expect(ranges, [null]);
++      expect(bytes, 10240);
++      expect(ranges, ['bytes=2048-4095', null]);
++      for (final range in ['bytes=-', 'bytes=-0']) {
++        final request = await client.getUrl(Uri.parse(proxy.url));
++        request.headers.set('range', range);
++        final response = await request.close();
++        expect(response.statusCode, HttpStatus.requestedRangeNotSatisfiable);
++        await response.drain<void>();
++      }
 +    } finally {
 +      client.close(force: true);
 +      await proxy.close();
