@@ -23,10 +23,10 @@ index 4bcfdbcced42a2dafd250d12e95549b27d1ac671..cef19f68124854cc018e5c267f07f38b
  
 diff --git a/CUSTOMIZATION.md b/CUSTOMIZATION.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..8c274e889a04da5e0ca3877006e5714a1c9cf195
+index 0000000000000000000000000000000000000000..458b32e694a0b79796340698064d247837a84efc
 --- /dev/null
 +++ b/CUSTOMIZATION.md
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,69 @@
 +# PiliPlus 定制版
 +
 +上游：<https://github.com/bggRGjQaUbCoE/PiliPlus>
@@ -94,6 +94,8 @@ index 0000000000000000000000000000000000000000..8c274e889a04da5e0ca3877006e5714a
 +测试覆盖来源与原作持久化、多 P 去重、换源收藏的请求顺序与失败恢复、跨账号隔离、匿名账号路由、已有倍速迁移及窄屏 / 宽屏歌单界面。
 +
 +换源搜索可提示 B 站标题中反复出现的候选歌名，歌单名称由网易云反查结果或手动命名决定。
++
++迁移旧版数据：新版首次启动或设置中的迁移入口会引导授权旧版私有存储。选择旧版 hive 目录后，下次启动自动合并账号、设置、歌单和歌词缓存。新数据优先，重复迁移按歌单和歌曲 ID 去重。下载文件仍在旧应用中。
 diff --git a/README.md b/README.md
 index 68fce8256ac8de430ec28f4cf34a952c6ef793be..56cea100967d377949f0506a2f5089b90fc70264 100644
 --- a/README.md
@@ -131,17 +133,20 @@ index 2799c8ec091a77757c686452f4ef0a2793f7112c..c6f6dec81531eda4e6d33e6bc27b67d2
  </resources>
 \ No newline at end of file
 diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
-index 7b6e8fbb902773601123521eae640ff958c1d63a..9b2c05dcf5b3d2ec49184d9cbd2f6bc158fc90c5 100644
+index 7b6e8fbb902773601123521eae640ff958c1d63a..96a6ebf9fca4fd896a25ea8a67ebf7bc423748bb 100644
 --- a/android/app/src/main/AndroidManifest.xml
 +++ b/android/app/src/main/AndroidManifest.xml
-@@ -1,5 +1,6 @@
+@@ -1,7 +1,9 @@
  <manifest xmlns:android="http://schemas.android.com/apk/res/android"
      package="com.example.piliplus">
 +    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
  
      <queries>
++        <package android:name="com.example.piliplus" />
          <intent>
-@@ -43,6 +44,15 @@
+             <action android:name="android.intent.action.VIEW" />
+             <category android:name="android.intent.category.BROWSABLE" />
+@@ -43,6 +45,15 @@
          android:icon="@mipmap/ic_launcher"
          android:label="@string/app_name"
          tools:replace="android:allowBackup">
@@ -157,7 +162,7 @@ index 7b6e8fbb902773601123521eae640ff958c1d63a..9b2c05dcf5b3d2ec49184d9cbd2f6bc1
          <meta-data
              android:name="io.flutter.embedding.android.EnableImpeller"
              android:value="false" />
-@@ -77,7 +87,7 @@
+@@ -77,7 +88,7 @@
                  <action android:name="android.intent.action.MAIN" />
                  <category android:name="android.intent.category.LAUNCHER" />
              </intent-filter>
@@ -166,7 +171,7 @@ index 7b6e8fbb902773601123521eae640ff958c1d63a..9b2c05dcf5b3d2ec49184d9cbd2f6bc1
                  <action android:name="android.intent.action.VIEW" />
  
                  <category android:name="android.intent.category.DEFAULT" />
-@@ -103,10 +113,10 @@
+@@ -103,10 +114,10 @@
                  <!--<data android:host="bangumi.bilibili.com"/>-->
                  <!--<data android:host="space.bilibili.com"/>-->
              </intent-filter>
@@ -179,11 +184,134 @@ index 7b6e8fbb902773601123521eae640ff958c1d63a..9b2c05dcf5b3d2ec49184d9cbd2f6bc1
  
                  <category android:name="android.intent.category.DEFAULT" />
                  <category android:name="android.intent.category.BROWSABLE" />
+diff --git a/android/app/src/main/kotlin/com/example/piliplus/LegacyMigration.kt b/android/app/src/main/kotlin/com/example/piliplus/LegacyMigration.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..88d25fb43ed9b67233894dd966cbcaadaa2f8b1b
+--- /dev/null
++++ b/android/app/src/main/kotlin/com/example/piliplus/LegacyMigration.kt
+@@ -0,0 +1,117 @@
++package com.example.piliplus
++
++import android.app.Activity
++import android.content.Intent
++import android.net.Uri
++import android.provider.DocumentsContract
++import io.flutter.plugin.common.MethodChannel
++import java.io.File
++import java.util.UUID
++
++class LegacyMigration(private val activity: Activity) {
++    private var pending: MethodChannel.Result? = null
++    private val authority = "com.example.piliplus.MTDataFilesProvider"
++    private val names = setOf("account", "userinfo", "localcache", "setting", "video", "historyword", "watchprogress")
++
++    fun available(): Boolean = try {
++        activity.packageManager.getApplicationInfo("com.example.piliplus", 0)
++        true
++    } catch (_: Exception) { false }
++
++    fun select(result: MethodChannel.Result) {
++        if (pending != null) {
++            result.error("busy", "迁移选择器已打开", null)
++            return
++        }
++        pending = result
++        try {
++            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
++                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
++                putExtra(DocumentsContract.EXTRA_INITIAL_URI,
++                    DocumentsContract.buildDocumentUri(authority, "com.example.piliplus/data/files/hive"))
++            }
++            activity.startActivityForResult(intent, 9137)
++        } catch (error: Exception) {
++            pending = null
++            result.error("picker", error.message, null)
++        }
++    }
++
++    fun onResult(request: Int, status: Int, data: Intent?): Boolean {
++        if (request != 9137) return false
++        val result = pending ?: return true
++        pending = null
++        val uri = data?.data
++        if (status != Activity.RESULT_OK || uri == null) {
++            result.success(null)
++            return true
++        }
++        Thread {
++            var stage: File? = null
++            try {
++                require(uri.authority == authority) { "请选择旧版 PiliPlus 提供的目录" }
++                val target = File(activity.cacheDir, "legacy_migration_${UUID.randomUUID()}")
++                stage = target
++                check(target.mkdirs())
++                var total = 0L
++                fun visit(id: String, depth: Int) {
++                    require(depth <= 4) { "旧版目录层级不正确" }
++                    val children = DocumentsContract.buildChildDocumentsUriUsingTree(uri, id)
++                    activity.contentResolver.query(children, arrayOf(
++                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
++                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
++                        DocumentsContract.Document.COLUMN_MIME_TYPE,
++                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
++                        DocumentsContract.Document.COLUMN_SIZE
++                    ), null, null, null)?.use { cursor ->
++                        while (cursor.moveToNext()) {
++                            val child = cursor.getString(0)
++                            val name = cursor.getString(1)
++                            if (cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) {
++                                if (name in setOf("data", "files", "hive", "app_flutter")) visit(child, depth + 1)
++                            } else if (name.endsWith(".hive") && name.removeSuffix(".hive") in names) {
++                                val before = cursor.getLong(3)
++                                val size = cursor.getLong(4)
++                                require(size in 0..67108864L) { "旧版数据过大" }
++                                val source = DocumentsContract.buildDocumentUriUsingTree(uri, child)
++                                val output = File(target, "legacy_$name")
++                                require(!output.exists()) { "目录包含重复的数据文件，请直接选择 hive 目录" }
++                                activity.contentResolver.openInputStream(source)!!.use { input ->
++                                    output.outputStream().use { destination ->
++                                        val buffer = ByteArray(32768)
++                                        while (true) {
++                                            val count = input.read(buffer)
++                                            if (count < 0) break
++                                            total += count
++                                            require(total <= 67108864L) { "迁移数据超过 64 MB" }
++                                            destination.write(buffer, 0, count)
++                                        }
++                                    }
++                                }
++                                require(output.length() == size) { "旧版数据正在变化，请退出旧版后重试" }
++                                activity.contentResolver.query(source, arrayOf(
++                                    DocumentsContract.Document.COLUMN_LAST_MODIFIED,
++                                    DocumentsContract.Document.COLUMN_SIZE
++                                ), null, null, null)?.use { checkCursor ->
++                                    require(checkCursor.moveToFirst() && checkCursor.getLong(0) == before &&
++                                        checkCursor.getLong(1) == size) { "旧版数据正在变化，请退出旧版后重试" }
++                                } ?: error("无法验证旧版数据")
++                            }
++                        }
++                    } ?: error("无法读取旧版目录")
++                }
++                visit(DocumentsContract.getTreeDocumentId(uri), 0)
++                require(File(target, "legacy_localcache.hive").exists() &&
++                    File(target, "legacy_setting.hive").exists()) { "未找到歌单和设置，请选择旧版的 data/files/hive 目录" }
++                activity.runOnUiThread { result.success(target.absolutePath) }
++            } catch (error: Exception) {
++                stage?.deleteRecursively()
++                activity.runOnUiThread { result.error("migration", error.message, null) }
++            } finally {
++                try { activity.revokeUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
++                catch (_: Exception) { }
++            }
++        }.start()
++        return true
++    }
++}
 diff --git a/android/app/src/main/kotlin/com/example/piliplus/MainActivity.kt b/android/app/src/main/kotlin/com/example/piliplus/MainActivity.kt
-index 170ed81c4ab0f3f82694abc9dc72a57e7d26b520..c239a4c4d3af5440744e320dd8bdaf203421fdf2 100644
+index 170ed81c4ab0f3f82694abc9dc72a57e7d26b520..cbd43e2b8642f1dd874bccacebb3a1f19307cd33 100644
 --- a/android/app/src/main/kotlin/com/example/piliplus/MainActivity.kt
 +++ b/android/app/src/main/kotlin/com/example/piliplus/MainActivity.kt
-@@ -1,12 +1,67 @@
+@@ -1,12 +1,77 @@
  package com.example.piliplus
  
  import android.content.res.Configuration
@@ -201,6 +329,13 @@ index 170ed81c4ab0f3f82694abc9dc72a57e7d26b520..c239a4c4d3af5440744e320dd8bdaf20
  import com.ryanheise.audioservice.AudioServiceActivity
  
  class MainActivity : AudioServiceActivity() {
++    private val legacyMigration by lazy { LegacyMigration(this) }
++
++    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
++        if (!legacyMigration.onResult(requestCode, resultCode, data)) {
++            super.onActivityResult(requestCode, resultCode, data)
++        }
++    }
 +    private val listeningNetworkChannel = "com.example.piliplus/listening_network"
 +    private val updateChannel = "com.example.piliplus/update"
 +
@@ -209,6 +344,9 @@ index 170ed81c4ab0f3f82694abc9dc72a57e7d26b520..c239a4c4d3af5440744e320dd8bdaf20
 +        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannel)
 +            .setMethodCallHandler { call, result ->
 +                when (call.method) {
++                    "legacyMigrationAvailable" -> result.success(legacyMigration.available())
++                    "migrationCachePath" -> result.success(cacheDir.absolutePath)
++                    "stageLegacyMigration" -> legacyMigration.select(result)
 +                    "installedApkPath" -> result.success(applicationInfo.sourceDir)
 +                    "installApk" -> {
 +                        val path = call.argument<String>("path")
@@ -453,10 +591,24 @@ index 96089a5f5356a40aca9d0c1340e87a0315fbd9f9..41460d32d140137bf1b625f688d9597f
    // 多少人在看
    // https://api.bilibili.com/x/player/online/total?aid=913663681&cid=1203559746&bvid=BV1MM4y1s7NZ&ts=56427838
 diff --git a/lib/main.dart b/lib/main.dart
-index 39345f3ab87b2ac98445c43bb8d22858bb94d9d7..6ec96c66dc375670ad5603dc41d8425ff9dfa068 100644
+index 39345f3ab87b2ac98445c43bb8d22858bb94d9d7..afb015323606e637940d67d80a7072c5cac162d6 100644
 --- a/lib/main.dart
 +++ b/lib/main.dart
-@@ -297,6 +297,7 @@ class MyApp extends StatelessWidget {
+@@ -1,4 +1,5 @@
+ import 'dart:io';
++import 'package:PiliPlus/utils/legacy_migration.dart';
+ 
+ import 'package:PiliPlus/build_config.dart';
+ import 'package:PiliPlus/common/constants.dart';
+@@ -98,6 +99,7 @@ void main() async {
+   await _initAppPath();
+   try {
+     await GStorage.init();
++    await LegacyMigration.applyPending();
+   } catch (e) {
+     await Utils.copyText(e.toString(), needToast: false);
+     if (kDebugMode) debugPrint('GStorage init error: $e');
+@@ -297,6 +299,7 @@ class MyApp extends StatelessWidget {
    Widget build(BuildContext context) {
      final (light, dark) = getAllTheme();
      return GetMaterialApp(
@@ -4855,18 +5007,19 @@ index 93fa59fa196812bc5760b3451de14b6cc390b5b2..76dd5cf54ed27ceb342a959ed685062d
          );
        } else {
 diff --git a/lib/pages/main/view.dart b/lib/pages/main/view.dart
-index bdc0673e12bf704bbf763ba0fbef0e0cc92cec05..706fbeecf8337538498f74a03e289d1fbc47d43f 100644
+index bdc0673e12bf704bbf763ba0fbef0e0cc92cec05..28ab75b711c7e83930bcfe29e0fe64a78d8560af 100644
 --- a/lib/pages/main/view.dart
 +++ b/lib/pages/main/view.dart
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  import 'dart:io';
++import 'package:PiliPlus/utils/legacy_migration.dart';
  
  import 'package:PiliPlus/common/style.dart';
 +import 'package:PiliPlus/common/constants.dart';
  import 'package:PiliPlus/common/widgets/floating_navigation_bar.dart';
  import 'package:PiliPlus/common/widgets/flutter/pop_scope.dart';
  import 'package:PiliPlus/common/widgets/image/network_img_layer.dart';
-@@ -19,6 +20,9 @@ import 'package:PiliPlus/utils/extension/theme_ext.dart';
+@@ -19,6 +21,9 @@ import 'package:PiliPlus/utils/extension/theme_ext.dart';
  import 'package:PiliPlus/utils/mobile_observer.dart';
  import 'package:PiliPlus/utils/platform_utils.dart';
  import 'package:PiliPlus/utils/storage.dart';
@@ -4876,15 +5029,18 @@ index bdc0673e12bf704bbf763ba0fbef0e0cc92cec05..706fbeecf8337538498f74a03e289d1f
  import 'package:flutter/services.dart';
  import 'package:get/get.dart';
  import 'package:material_ui/material_ui.dart';
-@@ -44,6 +48,7 @@ class _MainAppState extends PopScopeState<MainApp>
+@@ -44,6 +49,10 @@ class _MainAppState extends PopScopeState<MainApp>
    @override
    void initState() {
      super.initState();
-+    WidgetsBinding.instance.addPostFrameCallback((_) => _showForkNotice());
++    WidgetsBinding.instance.addPostFrameCallback((_) async {
++      await _showForkNotice();
++      if (mounted) await LegacyMigration.prompt(context);
++    });
      addObserverMobile(this);
      if (Platform.isMacOS) {
        HardwareKeyboard.instance.addHandler(_handleKeyEvent);
-@@ -57,6 +62,48 @@ class _MainAppState extends PopScopeState<MainApp>
+@@ -57,6 +66,48 @@ class _MainAppState extends PopScopeState<MainApp>
      }
    }
  
@@ -4933,7 +5089,7 @@ index bdc0673e12bf704bbf763ba0fbef0e0cc92cec05..706fbeecf8337538498f74a03e289d1f
    @override
    void didChangeDependencies() {
      super.didChangeDependencies();
-@@ -361,11 +408,19 @@ class _MainAppState extends PopScopeState<MainApp>
+@@ -361,11 +412,19 @@ class _MainAppState extends PopScopeState<MainApp>
        padding = .only(top: _padding.top, right: _padding.right);
      }
  
@@ -5230,6 +5386,30 @@ index 9904ed791e5210b3618a23d977929f83b5ef6d12..3da6331c33eb2cff15f2aa26ce08e6ae
        final index = historyList.indexOf(text);
        if (index != 0) {
          if (index != -1) historyList.removeAt(index);
+diff --git a/lib/pages/setting/models/extra_settings.dart b/lib/pages/setting/models/extra_settings.dart
+index 7b1321caadded868394ee4d5af0e8e47f0135716..f6b681b20a0b77db1c1cf5ecbd82b9b7b264a7e7 100644
+--- a/lib/pages/setting/models/extra_settings.dart
++++ b/lib/pages/setting/models/extra_settings.dart
+@@ -1,4 +1,5 @@
+ import 'dart:io' show Platform, Directory;
++import 'package:PiliPlus/utils/legacy_migration.dart';
+ 
+ import 'package:PiliPlus/common/widgets/custom_icon.dart';
+ import 'package:PiliPlus/common/widgets/dialog/simple_dialog_option.dart';
+@@ -38,6 +39,13 @@ import 'package:material_design_icons_flutter/material_design_icons_flutter.dart
+ import 'package:material_ui/material_ui.dart' hide RefreshIndicator;
+ 
+ List<SettingsModel> get extraSettings => [
++  if (Platform.isAndroid)
++    NormalModel(
++      title: '迁移旧版数据',
++      subtitle: '合并旧版账号、设置、听歌歌单和歌词缓存',
++      leading: const Icon(Icons.move_to_inbox),
++      onTap: (context, _) => LegacyMigration.start(context),
++    ),
+   if (PlatformUtils.isDesktop) ...[
+     SwitchModel(
+       title: '退出时最小化',
 diff --git a/lib/pages/setting/models/privacy_settings.dart b/lib/pages/setting/models/privacy_settings.dart
 index 64d7d8aa5428b1d28bc597403e388be2a6d60cfb..1b3d0ae99ca1cba137ae88e1c340475dc168e655 100644
 --- a/lib/pages/setting/models/privacy_settings.dart
@@ -5707,6 +5887,195 @@ index 29d63550a5dd975741bc5bdaed17fcc0a004b8fa..33df5564b9266e71c6e4ac2ac64cd7b7
        Api.ugcUrl,
        Api.pgcUrl,
        Api.pugvUrl,
+diff --git a/lib/utils/legacy_migration.dart b/lib/utils/legacy_migration.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2ce06ed91f181321f3b411961ff72e6f1ddbeea
+--- /dev/null
++++ b/lib/utils/legacy_migration.dart
+@@ -0,0 +1,183 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:PiliPlus/pages/listening/models.dart';
++import 'package:PiliPlus/utils/accounts.dart';
++import 'package:PiliPlus/utils/path_utils.dart';
++import 'package:PiliPlus/utils/storage.dart';
++import 'package:flutter/services.dart';
++import 'package:hive_ce/hive.dart';
++import 'package:material_ui/material_ui.dart';
++
++List<Map<String, dynamic>> mergeLegacyPlaylists(List current, List legacy) {
++  final lists = <String, ListeningPlaylist>{};
++  for (final raw in current) {
++    final list = ListeningPlaylist.fromJson(Map.from(raw as Map));
++    lists[list.id] = list;
++  }
++  for (final raw in legacy) {
++    final incoming = ListeningPlaylist.fromJson(Map.from(raw as Map));
++    final existing = lists[incoming.id];
++    if (existing == null) {
++      lists[incoming.id] = incoming;
++    } else {
++      final ids = existing.songs.map((song) => song.id).toSet();
++      existing.songs.addAll(incoming.songs.where((song) => ids.add(song.id)));
++    }
++  }
++  return lists.values.map((list) => list.toJson()).toList();
++}
++
++abstract final class LegacyMigration {
++  static const _channel = MethodChannel('com.example.piliplus/update');
++  static const _playlists = 'listeningPlaylistsV1';
++  static bool _busy = false;
++  static File get _pending => File('$appSupportDirPath/legacy_migration.json');
++
++  // Runs before settings, account routing and page controllers are initialized.
++  // Missing-key merges and playlist IDs make retries safe after interruption.
++  static Future<void> applyPending() async {
++    if (!Platform.isAndroid || !await _pending.exists()) return;
++    try {
++      final metadata = jsonDecode(await _pending.readAsString()) as Map;
++      final stage = Directory(metadata['path'] as String);
++      final temporary = (await _channel.invokeMethod<String>('migrationCachePath'))!;
++      if (!stage.absolute.path.startsWith('$temporary/legacy_migration_') ||
++          !await stage.exists()) {
++        throw const FormatException('迁移临时文件已失效，请重新选择旧版目录');
++      }
++      final targets = <String, Box<dynamic>>{
++        'setting': GStorage.setting,
++        'video': GStorage.video,
++        'account': Accounts.account,
++        'userinfo': GStorage.userInfo,
++        'historyword': GStorage.historyWord,
++        'watchprogress': GStorage.watchProgress,
++        'localcache': GStorage.localCache,
++      };
++      final snapshots = <String, Map<dynamic, dynamic>>{};
++      // Validate every Hive file before changing any destination.
++      for (final name in targets.keys) {
++        if (!await File('${stage.path}/legacy_$name.hive').exists()) continue;
++        final box = await Hive.openBox<dynamic>(
++          'legacy_$name',
++          path: stage.path,
++          crashRecovery: false,
++        );
++        try {
++          snapshots[name] = box.toMap();
++        } finally {
++          await box.close();
++        }
++      }
++      final oldLists = snapshots['localcache']?[_playlists];
++      final combined = oldLists == null
++          ? null
++          : mergeLegacyPlaylists(
++              GStorage.localCache.get(_playlists, defaultValue: <dynamic>[]) as List,
++              oldLists as List,
++            );
++      for (final entry in snapshots.entries) {
++        final target = targets[entry.key]!;
++        for (final value in entry.value.entries) {
++          if (entry.key == 'localcache' && value.key == _playlists) continue;
++          if (entry.key == 'setting' &&
++              const {'downloadPath', 'appFont', 'enableDocProvider'}.contains(value.key)) {
++            continue;
++          }
++          if (!target.containsKey(value.key)) await target.put(value.key, value.value);
++        }
++        await target.flush();
++      }
++      if (combined != null) await GStorage.localCache.put(_playlists, combined);
++      await GStorage.localCache.put('legacyMigrationResult', '旧版账号、设置、歌单和歌词缓存已合并。已有记录优先保留。');
++      await GStorage.localCache.put('legacyMigrationCompleted', true);
++      await _pending.delete();
++      await stage.delete(recursive: true);
++    } catch (error) {
++      await GStorage.localCache.put('legacyMigrationResult', '迁移未完成，可在设置中重试。$error');
++    }
++  }
++
++  static Future<void> prompt(BuildContext context) async {
++    if (!Platform.isAndroid || !context.mounted) return;
++    final result = GStorage.localCache.get('legacyMigrationResult');
++    if (result is String) {
++      await GStorage.localCache.delete('legacyMigrationResult');
++      if (!context.mounted) return;
++      await showDialog<void>(
++        context: context,
++        builder: (dialog) => AlertDialog(
++          title: const Text('旧版数据迁移'),
++          content: Text(result),
++          actions: [TextButton(onPressed: () => Navigator.pop(dialog), child: const Text('知道了'))],
++        ),
++      );
++      return;
++    }
++    if (GStorage.localCache.get('legacyMigrationOffered') == true ||
++        GStorage.localCache.get('legacyMigrationCompleted') == true) return;
++    try {
++      if (await _channel.invokeMethod<bool>('legacyMigrationAvailable') != true) return;
++      await GStorage.localCache.put('legacyMigrationOffered', true);
++      if (context.mounted) await start(context);
++    } on PlatformException {
++      // The manual entry remains available if package discovery fails.
++    }
++  }
++
++  static Future<void> start(BuildContext context) async {
++    if (_busy || !Platform.isAndroid) return;
++    _busy = true;
++    try {
++      final confirmed = await showDialog<bool>(
++        context: context,
++        builder: (dialog) => AlertDialog(
++          title: const Text('迁移旧版数据'),
++          content: const Text(
++            '先在旧版 PiliPlus 的设置 → 其他设置中开启“允许三方APP访问私有存储”，'
++            '停止旧版播放并退出旧版。\n\n'
++            '接下来在系统文件选择器中选择旧版 PiliPlus → data → files → hive，授权读取。'
++            '选择完成后退出并重新打开 Piliplus，自动合并账号、设置、歌单和歌词缓存。'
++            '当前已有的设置和同名记录优先保留。视频下载和音频文件缓存仍在旧版中。',
++          ),
++          actions: [
++            TextButton(onPressed: () => Navigator.pop(dialog, false), child: const Text('稍后')),
++            FilledButton(onPressed: () => Navigator.pop(dialog, true), child: const Text('选择旧版目录')),
++          ],
++        ),
++      );
++      if (confirmed != true) return;
++      final path = await _channel.invokeMethod<String>('stageLegacyMigration');
++      if (path == null || !context.mounted) return;
++      await _pending.writeAsString(jsonEncode({'path': path}), flush: true);
++      if (!context.mounted) return;
++      final exit = await showDialog<bool>(
++        context: context,
++        barrierDismissible: false,
++        builder: (dialog) => AlertDialog(
++          title: const Text('迁移数据已准备好'),
++          content: const Text('退出并重新打开 Piliplus 后自动合并。'),
++          actions: [
++            TextButton(onPressed: () => Navigator.pop(dialog, false), child: const Text('下次启动迁移')),
++            FilledButton(onPressed: () => Navigator.pop(dialog, true), child: const Text('退出应用')),
++          ],
++        ),
++      );
++      if (exit == true) await SystemNavigator.pop();
++    } catch (error) {
++      if (context.mounted) {
++        await showDialog<void>(
++          context: context,
++          builder: (dialog) => AlertDialog(
++            title: const Text('迁移未完成'),
++            content: Text('$error'),
++            actions: [TextButton(onPressed: () => Navigator.pop(dialog), child: const Text('知道了'))],
++          ),
++        );
++      }
++    } finally {
++      _busy = false;
++    }
++  }
++}
 diff --git a/lib/utils/storage_pref.dart b/lib/utils/storage_pref.dart
 index b0eef7f8ea3e18e0c8d09606ee1ce56fe6da9871..164e49f0bc6c276c1e449494bd7fb250fe0bf7d0 100644
 --- a/lib/utils/storage_pref.dart
@@ -7700,6 +8069,56 @@ index 0000000000000000000000000000000000000000..0489e1f68ce0e3118bdd92612cf89ca9
 +    expect(Pref.speedList, speeds);
 +    await GStorage.video.put(VideoBoxKey.speedsList, [1.0, 2.5]);
 +    expect(Pref.speedList, [1.0, 2.5]); // Deleting a preset remains supported.
++  });
++}
+diff --git a/test/utils/legacy_migration_test.dart b/test/utils/legacy_migration_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..d55adf5977dc800de85249a9c969da1605eab5a1
+--- /dev/null
++++ b/test/utils/legacy_migration_test.dart
+@@ -0,0 +1,44 @@
++import 'package:PiliPlus/utils/legacy_migration.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++Map<String, dynamic> song(String id, String name) => {
++  'id': id,
++  'name': name,
++  'nameEdited': true,
++  'original': {
++    'bvid': 'BV$id',
++    'aid': 1,
++    'cid': 1,
++    'page': 1,
++    'title': name,
++  },
++  'source': {
++    'bvid': 'BV$id',
++    'aid': 1,
++    'cid': 1,
++    'page': 1,
++    'title': name,
++  },
++};
++
++void main() {
++  test('migration merges legacy songs without overwriting current edits', () {
++    final current = [
++      {'id': 'list', 'name': '新名称', 'songs': [song('1', '新歌名')]},
++    ];
++    final legacy = [
++      {'id': 'list', 'name': '旧名称', 'songs': [song('1', '旧歌名'), song('2', '另一首')]},
++      {'id': 'other', 'name': '旧歌单', 'songs': [song('3', '第三首')]},
++    ];
++    final merged = mergeLegacyPlaylists(current, legacy);
++    expect(merged.length, 2);
++    expect(merged.first['name'], '新名称');
++    expect((merged.first['songs'] as List).map((song) => song['name']), ['新歌名', '另一首']);
++    expect(mergeLegacyPlaylists(merged, legacy), merged);
++    expect((current.first['songs'] as List).length, 1);
++  });
++
++  test('malformed old playlists fail validation before applying data', () {
++    expect(() => mergeLegacyPlaylists([], [{'id': 'bad'}]), throwsA(isA<TypeError>()));
 +  });
 +}
 diff --git a/windows/packaging/exe/make_config.yaml b/windows/packaging/exe/make_config.yaml
